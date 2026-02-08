@@ -1656,35 +1656,91 @@ class StockInfoAPI:
             return {"error": f"Error fetching stock information: {str(e)}"}
 
 
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({"error": "Endpoint not found"}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    import traceback
+    error_msg = str(error)
+    if os.environ.get('FLASK_ENV') == 'development':
+        return jsonify({
+            "error": "Internal server error",
+            "details": error_msg,
+            "traceback": traceback.format_exc()
+        }), 500
+    return jsonify({"error": "Internal server error. Please try again later."}), 500
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    import traceback
+    if os.environ.get('FLASK_ENV') == 'development':
+        return jsonify({
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+    return jsonify({"error": "An error occurred. Please try again."}), 500
+
 @app.route('/')
 def index():
     """Render the main page"""
-    return render_template('index.html')
-
+    try:
+        return render_template('index.html')
+    except Exception as e:
+        return f"Error loading template: {str(e)}", 500
 
 @app.route('/api/stock/<ticker>', methods=['GET'])
 def get_stock(ticker):
     """API endpoint to get stock information"""
-    result = StockInfoAPI.get_stock_info(ticker)
-    return jsonify(result)
-
+    try:
+        result = StockInfoAPI.get_stock_info(ticker)
+        return jsonify(result)
+    except Exception as e:
+        import traceback
+        if os.environ.get('FLASK_ENV') == 'development':
+            return jsonify({
+                "error": f"Error fetching stock data: {str(e)}",
+                "traceback": traceback.format_exc()
+            }), 500
+        return jsonify({"error": "Error fetching stock data. Please try again."}), 500
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
     """Chat endpoint that processes ticker symbols"""
-    data = request.json
-    message = data.get('message', '').strip().upper()
-    
-    # Extract ticker symbol from message (1-5 uppercase letters)
-    ticker_match = re.search(r'\b([A-Z]{1,5})\b', message)
-    if ticker_match:
-        ticker = ticker_match.group(1)
-        result = StockInfoAPI.get_stock_info(ticker)
-        return jsonify(result)
-    else:
-        return jsonify({
-            "error": "Please provide a valid ticker symbol (e.g., AAPL, MSFT, TSLA)"
-        })
+    try:
+        if not request.json:
+            return jsonify({"error": "No JSON data provided"}), 400
+        
+        data = request.json
+        message = data.get('message', '').strip().upper()
+        
+        if not message:
+            return jsonify({"error": "Please provide a message"}), 400
+        
+        # Extract ticker symbol from message (1-5 uppercase letters)
+        ticker_match = re.search(r'\b([A-Z]{1,5})\b', message)
+        if ticker_match:
+            ticker = ticker_match.group(1)
+            result = StockInfoAPI.get_stock_info(ticker)
+            return jsonify(result)
+        else:
+            return jsonify({
+                "error": "Please provide a valid ticker symbol (e.g., AAPL, MSFT, TSLA)"
+            }), 400
+    except Exception as e:
+        import traceback
+        if os.environ.get('FLASK_ENV') == 'development':
+            return jsonify({
+                "error": f"Error processing request: {str(e)}",
+                "traceback": traceback.format_exc()
+            }), 500
+        return jsonify({"error": "Error processing request. Please try again."}), 500
+
+@app.route('/health')
+def health():
+    """Health check endpoint"""
+    return jsonify({"status": "ok", "message": "App is running"})
 
 
 if __name__ == '__main__':
