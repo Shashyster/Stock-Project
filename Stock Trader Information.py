@@ -95,7 +95,7 @@ class CompanyInfoTracker:
                 print(f"Warning: Could not fetch detailed info: {fetch_error}")
                 print("Attempting to retrieve basic information from price data...")
                 
-                # Get basic info from historical data
+                # Get basic info from historical data  
                 hist = ticker.history(period="5d")
                 if not hist.empty:
                     latest = hist.iloc[-1]
