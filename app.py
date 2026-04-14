@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 import urllib3
 import re
 import os
+import math
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -53,16 +54,26 @@ class TechnicalAnalysis:
     
     @staticmethod
     def calculate_moving_averages(prices):
-        """Calculate various moving averages"""
-        if len(prices) < 200:
+        """Calculate various moving averages (partial results when history < 200 days)."""
+        if len(prices) < 12:
             return {}
-        return {
-            'sma_20': float(prices.rolling(window=20).mean().iloc[-1]) if len(prices) >= 20 else None,
-            'sma_50': float(prices.rolling(window=50).mean().iloc[-1]) if len(prices) >= 50 else None,
-            'sma_200': float(prices.rolling(window=200).mean().iloc[-1]) if len(prices) >= 200 else None,
-            'ema_12': float(prices.ewm(span=12, adjust=False).mean().iloc[-1]) if len(prices) >= 12 else None,
-            'ema_26': float(prices.ewm(span=26, adjust=False).mean().iloc[-1]) if len(prices) >= 26 else None,
-        }
+        out = {}
+        if len(prices) >= 20:
+            v = prices.rolling(window=20).mean().iloc[-1]
+            out['sma_20'] = float(v) if not pd.isna(v) else None
+        if len(prices) >= 50:
+            v = prices.rolling(window=50).mean().iloc[-1]
+            out['sma_50'] = float(v) if not pd.isna(v) else None
+        if len(prices) >= 200:
+            v = prices.rolling(window=200).mean().iloc[-1]
+            out['sma_200'] = float(v) if not pd.isna(v) else None
+        if len(prices) >= 12:
+            v = prices.ewm(span=12, adjust=False).mean().iloc[-1]
+            out['ema_12'] = float(v) if not pd.isna(v) else None
+        if len(prices) >= 26:
+            v = prices.ewm(span=26, adjust=False).mean().iloc[-1]
+            out['ema_26'] = float(v) if not pd.isna(v) else None
+        return out
     
     @staticmethod
     def calculate_bollinger_bands(prices, period=20, std_dev=2):
@@ -460,8 +471,111 @@ class StockInfoAPI:
     """API class to fetch stock information"""
     
     @staticmethod
+    def _scalar_ok(val):
+        """True if val is a usable numeric scalar (not None / NaN / inf)."""
+        if val is None:
+            return False
+        if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+            return False
+        try:
+            if pd.isna(val):
+                return False
+        except (TypeError, ValueError):
+            pass
+        return True
+    
+    @staticmethod
+    def _enrich_info_from_fast_info(ticker_obj, info):
+        """Fill missing Yahoo `info` fields from yfinance FastInfo (common when keys exist but are null)."""
+        if not isinstance(info, dict):
+            info = {}
+        else:
+            info = dict(info)
+        try:
+            fi = ticker_obj.fast_info
+        except Exception:
+            return info
+        
+        def fi_get(attr):
+            try:
+                return getattr(fi, attr, None)
+            except Exception:
+                return None
+        
+        pairs = [
+            ('currentPrice', ('last_price',)),
+            ('regularMarketPrice', ('last_price',)),
+            ('previousClose', ('previous_close', 'regular_market_previous_close')),
+            ('open', ('open',)),
+            ('dayHigh', ('day_high',)),
+            ('dayLow', ('day_low',)),
+            ('marketCap', ('market_cap',)),
+            ('sharesOutstanding', ('shares',)),
+            ('fiftyTwoWeekHigh', ('year_high',)),
+            ('fiftyTwoWeekLow', ('year_low',)),
+            ('fiftyDayAverage', ('fifty_day_average',)),
+            ('twoHundredDayAverage', ('two_hundred_day_average',)),
+            ('currency', ('currency',)),
+            ('exchange', ('exchange',)),
+            ('averageVolume', ('three_month_average_volume', 'ten_day_average_volume')),
+        ]
+        for info_key, fi_attrs in pairs:
+            if StockInfoAPI._scalar_ok(info.get(info_key)):
+                continue
+            for fa in fi_attrs:
+                v = fi_get(fa)
+                if StockInfoAPI._scalar_ok(v):
+                    info[info_key] = v
+                    break
+        if not StockInfoAPI._scalar_ok(info.get('volume')):
+            v = fi_get('last_volume')
+            if StockInfoAPI._scalar_ok(v):
+                info['volume'] = v
+        return info
+    
+    @staticmethod
+    def _fill_market_fields_from_history(info, hist):
+        """Back-fill price/volume/52w from OHLCV when Yahoo leaves info fields null."""
+        if hist is None or hist.empty:
+            return info
+        if not isinstance(info, dict):
+            info = {}
+        else:
+            info = dict(info)
+        last = hist.iloc[-1]
+        prev = hist.iloc[-2] if len(hist) > 1 else last
+        
+        def set_if_bad(key, val):
+            if StockInfoAPI._scalar_ok(info.get(key)):
+                return
+            try:
+                if val is not None and not (isinstance(val, float) and (math.isnan(val) or math.isinf(val))):
+                    info[key] = float(val)
+            except (TypeError, ValueError):
+                pass
+        
+        set_if_bad('currentPrice', last.get('Close'))
+        set_if_bad('regularMarketPrice', last.get('Close'))
+        set_if_bad('previousClose', prev.get('Close'))
+        set_if_bad('open', last.get('Open'))
+        set_if_bad('dayHigh', last.get('High'))
+        set_if_bad('dayLow', last.get('Low'))
+        set_if_bad('volume', last.get('Volume'))
+        if len(hist) >= 5:
+            try:
+                set_if_bad('fiftyTwoWeekHigh', float(hist['High'].max()))
+                set_if_bad('fiftyTwoWeekLow', float(hist['Low'].min()))
+            except Exception:
+                pass
+        return info
+    
+    @staticmethod
     def format_large_number(num):
         """Format large numbers in readable format"""
+        if num is None or num == 'N/A':
+            return 'N/A'
+        if isinstance(num, float) and (math.isnan(num) or math.isinf(num)):
+            return 'N/A'
         if not isinstance(num, (int, float)):
             return str(num)
         
@@ -476,7 +590,11 @@ class StockInfoAPI:
     
     @staticmethod
     def format_percentage(num):
-        """Format percentage values"""
+        """Format percentage values (Yahoo often sends decimals e.g. 0.15 for 15%)."""
+        if num is None or num == 'N/A':
+            return 'N/A'
+        if isinstance(num, float) and (math.isnan(num) or math.isinf(num)):
+            return 'N/A'
         if not isinstance(num, (int, float)):
             return str(num)
         return f"{num*100:.2f}%"
@@ -484,12 +602,14 @@ class StockInfoAPI:
     @staticmethod
     def format_date(timestamp):
         """Format Unix timestamp to readable date"""
+        if timestamp is None or timestamp == 'N/A':
+            return 'N/A'
         if not isinstance(timestamp, (int, float)):
             return str(timestamp)
         try:
             return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d')
-        except:
-            return str(timestamp)
+        except Exception:
+            return 'N/A'
     
     @staticmethod
     def generate_ai_analysis(stock_data, hist_data, info, ticker_obj=None):
@@ -1397,9 +1517,15 @@ class StockInfoAPI:
                 return {"error": f"No data returned for ticker '{ticker}'"}
             
             # Get historical data from start (max period)
-            hist_max = ticker_obj.history(period="max")
-            hist_1y = ticker_obj.history(period="1y")
-            hist_5y = ticker_obj.history(period="5y")
+            hist_max = ticker_obj.history(period="max", auto_adjust=True)
+            hist_1y = ticker_obj.history(period="1y", auto_adjust=True)
+            hist_5y = ticker_obj.history(period="5y", auto_adjust=True)
+            
+            # Yahoo often returns nulls for fields that FastInfo / OHLCV still provide
+            info = StockInfoAPI._enrich_info_from_fast_info(ticker_obj, info)
+            info = StockInfoAPI._fill_market_fields_from_history(info, hist_1y)
+            if not str(info.get('longName') or '').strip():
+                info['longName'] = info.get('shortName') or info.get('symbol') or ticker.upper()
             
             # Calculate yearly performance
             yearly_performance = []
@@ -1562,12 +1688,19 @@ class StockInfoAPI:
                     formatted_info["fiveYearLow"] = float(hist_5y['Close'].min())
                     formatted_info["fiveYearReturn"] = f"{((hist_5y['Close'].iloc[-1] - hist_5y['Close'].iloc[0]) / hist_5y['Close'].iloc[0] * 100):.2f}%"
             
-            # Calculate Technical Indicators
-            if not hist_1y.empty and len(hist_1y) >= 200:
-                close_prices = hist_1y['Close']
-                high_prices = hist_1y['High']
-                low_prices = hist_1y['Low']
-                volume_data = hist_1y['Volume']
+            # Technical indicators: use longest practical window (not only 1y / 200d gate)
+            hist_ta = hist_max if not hist_max.empty and len(hist_max) >= len(hist_1y) else hist_1y
+            if hist_ta.empty:
+                hist_ta = hist_1y
+            if len(hist_ta) > 600:
+                hist_ta = hist_ta.tail(600).copy()
+            
+            # Calculate Technical Indicators (RSI needs ~15 bars; MACD ~26; SMA200 needs 200 when available)
+            if not hist_ta.empty and len(hist_ta) >= 30:
+                close_prices = hist_ta['Close']
+                high_prices = hist_ta['High']
+                low_prices = hist_ta['Low']
+                volume_data = hist_ta['Volume']
                 
                 # RSI
                 rsi = TechnicalAnalysis.calculate_rsi(close_prices)
@@ -1625,15 +1758,16 @@ class StockInfoAPI:
                 
                 # Additional Finviz-style metrics
                 # Price change percentages
-                if len(hist_1y) >= 5:
-                    formatted_info["change5d"] = f"{((close_prices.iloc[-1] - close_prices.iloc[-5]) / close_prices.iloc[-5] * 100):.2f}%" if len(hist_1y) >= 5 else 'N/A'
-                if len(hist_1y) >= 20:
-                    formatted_info["change20d"] = f"{((close_prices.iloc[-1] - close_prices.iloc[-20]) / close_prices.iloc[-20] * 100):.2f}%" if len(hist_1y) >= 20 else 'N/A'
-                if len(hist_1y) >= 60:
-                    formatted_info["change60d"] = f"{((close_prices.iloc[-1] - close_prices.iloc[-60]) / close_prices.iloc[-60] * 100):.2f}%" if len(hist_1y) >= 60 else 'N/A'
+                ta_len = len(close_prices)
+                if ta_len >= 5:
+                    formatted_info["change5d"] = f"{((close_prices.iloc[-1] - close_prices.iloc[-5]) / close_prices.iloc[-5] * 100):.2f}%"
+                if ta_len >= 20:
+                    formatted_info["change20d"] = f"{((close_prices.iloc[-1] - close_prices.iloc[-20]) / close_prices.iloc[-20] * 100):.2f}%"
+                if ta_len >= 60:
+                    formatted_info["change60d"] = f"{((close_prices.iloc[-1] - close_prices.iloc[-60]) / close_prices.iloc[-60] * 100):.2f}%"
                 
                 # Volatility (30-day)
-                if len(hist_1y) >= 30:
+                if ta_len >= 30:
                     returns_30d = close_prices.pct_change().dropna()
                     volatility_30d = returns_30d.tail(30).std() * np.sqrt(252) * 100  # Annualized
                     formatted_info["volatility30d"] = f"{volatility_30d:.2f}%"
@@ -1645,9 +1779,33 @@ class StockInfoAPI:
                     volume_ratio = (current_volume / avg_volume_20d) * 100
                     formatted_info["volumeRatio"] = round(volume_ratio, 2)
             
+            # Normalize nulls from Yahoo (keys present, values null) so UI shows N/A not blanks
+            _skip_na_sanitize = frozenset({
+                'yearlyPerformance', 'companyOfficers', 'hasHistoricalData',
+                'historicalDataPoints', 'totalTradingDays',
+            })
+            for _k, _v in list(formatted_info.items()):
+                if _k in _skip_na_sanitize or isinstance(_v, (dict, list)):
+                    continue
+                if _v is None:
+                    formatted_info[_k] = 'N/A'
+                elif isinstance(_v, float) and (math.isnan(_v) or math.isinf(_v)):
+                    formatted_info[_k] = 'N/A'
+                else:
+                    try:
+                        if pd.isna(_v):
+                            formatted_info[_k] = 'N/A'
+                    except (TypeError, ValueError):
+                        pass
+            
             # AI-Powered Analysis and Predictions
             ticker_obj_for_analysis = yf.Ticker(ticker.upper())
-            analysis = StockInfoAPI.generate_ai_analysis(formatted_info, hist_1y if not hist_1y.empty else None, info, ticker_obj_for_analysis)
+            analysis = StockInfoAPI.generate_ai_analysis(
+                formatted_info,
+                hist_1y if not hist_1y.empty else None,
+                info,
+                ticker_obj_for_analysis,
+            )
             formatted_info["aiAnalysis"] = analysis
             
             return formatted_info
@@ -1656,91 +1814,35 @@ class StockInfoAPI:
             return {"error": f"Error fetching stock information: {str(e)}"}
 
 
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({"error": "Endpoint not found"}), 404
-
-@app.errorhandler(500)
-def internal_error(error):
-    import traceback
-    error_msg = str(error)
-    if os.environ.get('FLASK_ENV') == 'development':
-        return jsonify({
-            "error": "Internal server error",
-            "details": error_msg,
-            "traceback": traceback.format_exc()
-        }), 500
-    return jsonify({"error": "Internal server error. Please try again later."}), 500
-
-@app.errorhandler(Exception)
-def handle_exception(e):
-    import traceback
-    if os.environ.get('FLASK_ENV') == 'development':
-        return jsonify({
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
-    return jsonify({"error": "An error occurred. Please try again."}), 500
-
 @app.route('/')
 def index():
     """Render the main page"""
-    try:
-        return render_template('index.html')
-    except Exception as e:
-        return f"Error loading template: {str(e)}", 500
+    return render_template('index.html')
+
 
 @app.route('/api/stock/<ticker>', methods=['GET'])
 def get_stock(ticker):
     """API endpoint to get stock information"""
-    try:
-        result = StockInfoAPI.get_stock_info(ticker)
-        return jsonify(result)
-    except Exception as e:
-        import traceback
-        if os.environ.get('FLASK_ENV') == 'development':
-            return jsonify({
-                "error": f"Error fetching stock data: {str(e)}",
-                "traceback": traceback.format_exc()
-            }), 500
-        return jsonify({"error": "Error fetching stock data. Please try again."}), 500
+    result = StockInfoAPI.get_stock_info(ticker)
+    return jsonify(result)
+
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
     """Chat endpoint that processes ticker symbols"""
-    try:
-        if not request.json:
-            return jsonify({"error": "No JSON data provided"}), 400
-        
-        data = request.json
-        message = data.get('message', '').strip().upper()
-        
-        if not message:
-            return jsonify({"error": "Please provide a message"}), 400
-        
-        # Extract ticker symbol from message (1-5 uppercase letters)
-        ticker_match = re.search(r'\b([A-Z]{1,5})\b', message)
-        if ticker_match:
-            ticker = ticker_match.group(1)
-            result = StockInfoAPI.get_stock_info(ticker)
-            return jsonify(result)
-        else:
-            return jsonify({
-                "error": "Please provide a valid ticker symbol (e.g., AAPL, MSFT, TSLA)"
-            }), 400
-    except Exception as e:
-        import traceback
-        if os.environ.get('FLASK_ENV') == 'development':
-            return jsonify({
-                "error": f"Error processing request: {str(e)}",
-                "traceback": traceback.format_exc()
-            }), 500
-        return jsonify({"error": "Error processing request. Please try again."}), 500
-
-@app.route('/health')
-def health():
-    """Health check endpoint"""
-    return jsonify({"status": "ok", "message": "App is running"})
+    data = request.json
+    message = data.get('message', '').strip().upper()
+    
+    # Extract ticker symbol from message (1-5 uppercase letters)
+    ticker_match = re.search(r'\b([A-Z]{1,5})\b', message)
+    if ticker_match:
+        ticker = ticker_match.group(1)
+        result = StockInfoAPI.get_stock_info(ticker)
+        return jsonify(result)
+    else:
+        return jsonify({
+            "error": "Please provide a valid ticker symbol (e.g., AAPL, MSFT, TSLA)"
+        })
 
 
 if __name__ == '__main__':

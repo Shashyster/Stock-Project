@@ -7,14 +7,17 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=3">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=4">
 </head>
 <body>
     <div class="container">
         <!-- Header -->
         <div class="header">
-            <h1>Stock Intelligence Platform</h1>
-            <p class="subtitle">Comprehensive stock analysis and investment insights</p>
+            <div class="header-main">
+                <h1>Stock Intelligence Platform</h1>
+                <p class="subtitle">Comprehensive stock analysis and investment insights</p>
+            </div>
+            <span class="app-version" aria-label="Version 1.2">V 1.2</span>
         </div>
 
         <!-- Chat Messages Area -->
